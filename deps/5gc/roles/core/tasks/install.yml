@@ -320,7 +320,7 @@
         values_files:
           - /tmp/sdcore-5g-values.yaml
         wait: true
-        wait_timeout: "2m30s"
+        wait_timeout: "5m0s" # Increase wait timeout to allow for longer deployment times in systems with limited compute resources
         force: true
       when: inventory_hostname in groups['master_nodes']
 
@@ -385,6 +385,28 @@
         - inventory_hostname in groups['master_nodes']
         - (item.status.phase | default('')) != 'Running'
       ignore_errors: yes
-  always:
-    - pause:
-        seconds: 60
+
+    # Poll until every pod in the namespace reports phase Running,
+    # or give up after ~5 minutes (matching the helm wait_timeout budget above).
+    - name: wait for aether-5gc pods to be Running after restart
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: aether-5gc
+      register: pod_ready_status
+      until: (pod_ready_status.resources | default([]) | rejectattr('status.phase', 'equalto', 'Running') | list | length) == 0
+      retries: 30
+      delay: 10
+      when: inventory_hostname in groups['master_nodes']
+
+    - name: fail loudly when pods are still not Running after restart
+      ansible.builtin.fail:
+        msg: >-
+          The following aether-5gc pods did not reach Running after being
+          restarted by the rescue block:
+          {{ pod_ready_status.resources | default([])
+             | rejectattr('status.phase', 'equalto', 'Running')
+             | map(attribute='metadata.name') | list | join(', ') }}.
+      when:
+        - inventory_hostname in groups['master_nodes']
+        - (pod_ready_status.resources | default([]) | rejectattr('status.phase', 'equalto', 'Running') | list | length) > 0
